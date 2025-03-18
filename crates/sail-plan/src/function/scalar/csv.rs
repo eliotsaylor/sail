@@ -26,7 +26,6 @@ use crate::utils::ItemTaker;
 ///     "STRUCT<_c0: TYPE1, _c1: TYPE2, ...>"
 fn schema_of_csv(input: ScalarFunctionInput) -> PlanResult<expr::Expr> {
     let ScalarFunctionInput { arguments, .. } = input;
-
     let (csv_expr, options) = match arguments.len() {
         1 => (arguments.one()?, HashMap::new()),
         2 => {
@@ -36,7 +35,6 @@ fn schema_of_csv(input: ScalarFunctionInput) -> PlanResult<expr::Expr> {
         }
         _ => return Err(PlanError::todo("schema_of_csv expects 1 or 2 arguments")),
     };
-
     let csv_str = match csv_expr {
         expr::Expr::Literal(ScalarValue::Utf8(Some(csv))) => csv,
         _ => {
@@ -45,43 +43,34 @@ fn schema_of_csv(input: ScalarFunctionInput) -> PlanResult<expr::Expr> {
             ))
         }
     };
-
     let fields = parse_csv_line(&csv_str, &options)?;
     let field_types = infer_field_types(&fields);
-
     let schema_parts: Vec<String> = fields
         .iter()
         .enumerate()
         .zip(field_types.iter())
         .map(|((i, _), field_type)| format!("_c{}: {}", i, field_type))
         .collect();
-
     let schema_ddl = format!("STRUCT<{}>", schema_parts.join(", "));
-
     Ok(lit(ScalarValue::Utf8(Some(schema_ddl))))
 }
 
 /// Parse a CSV line and return the fields as a vector of strings
 fn parse_csv_line(csv_str: &str, options: &HashMap<String, String>) -> PlanResult<Vec<String>> {
-    // Extract CSV options with defaults
     let delimiter = options
         .get("delimiter")
         .and_then(|s| s.chars().next())
         .unwrap_or(',') as u8;
-
     let quote = options
         .get("quote")
         .and_then(|s| s.chars().next())
         .unwrap_or('"') as u8;
-
     let escape = options
         .get("escape")
         .and_then(|s| s.chars().next())
         .unwrap_or('\\') as u8;
-
     let csv_with_newline = format!("{}\n", csv_str);
     let cursor = Cursor::new(csv_with_newline);
-
     let mut reader = ReaderBuilder::new()
         .delimiter(delimiter)
         .quote(quote)
@@ -89,7 +78,6 @@ fn parse_csv_line(csv_str: &str, options: &HashMap<String, String>) -> PlanResul
         .has_headers(false)
         .flexible(true)
         .from_reader(cursor);
-
     let mut record = csv::StringRecord::new();
     match reader.read_record(&mut record) {
         Ok(true) => {
@@ -140,23 +128,18 @@ fn infer_field_types(fields: &[String]) -> Vec<String> {
         .iter()
         .map(|field| {
             let trimmed = field.trim();
-
             if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
                 return "STRING".to_string();
             }
-
             if trimmed.parse::<i64>().is_ok() {
                 return "INT".to_string();
             }
-
             if trimmed.parse::<f64>().is_ok() {
                 return "DOUBLE".to_string();
             }
-
             if trimmed.eq_ignore_ascii_case("true") || trimmed.eq_ignore_ascii_case("false") {
                 return "BOOLEAN".to_string();
             }
-
             if trimmed.len() == 10 && trimmed.matches('-').count() == 2 {
                 if let [year, month, day] = trimmed.split('-').collect::<Vec<_>>()[..] {
                     if year.parse::<i32>().is_ok()
@@ -167,7 +150,6 @@ fn infer_field_types(fields: &[String]) -> Vec<String> {
                     }
                 }
             }
-
             if (trimmed.len() >= 19
                 && trimmed.contains(' ')
                 && trimmed.matches(':').count() == 2
@@ -190,7 +172,6 @@ fn extract_map_options(
     let map_array = map_array.as_ref();
     let keys = map_array.keys();
     let values = map_array.values();
-
     if let Some(key_array) = keys
         .as_any()
         .downcast_ref::<datafusion::arrow::array::StringArray>()
@@ -206,20 +187,17 @@ fn extract_map_options(
             }
         }
     }
-
     Ok(options)
 }
 
 /// Parses options from a string like "key1=value1,key2=value2"
 fn parse_options_string(opts_str: &str) -> PlanResult<HashMap<String, String>> {
     let mut options = HashMap::new();
-
     for part in opts_str.split(',') {
         if let Some((key, value)) = part.split_once('=') {
             options.insert(key.trim().to_string(), value.trim().to_string());
         }
     }
-
     Ok(options)
 }
 
@@ -231,11 +209,9 @@ fn simple_parse_json_like_string(s: &str, options: &mut HashMap<String, String>)
     } else {
         s
     };
-
     let mut parts = Vec::new();
     let mut start = 0;
     let mut in_quotes = false;
-
     for (i, c) in s.char_indices() {
         if c == '"' {
             in_quotes = !in_quotes;
@@ -244,30 +220,25 @@ fn simple_parse_json_like_string(s: &str, options: &mut HashMap<String, String>)
             start = i + 1;
         }
     }
-
     if start < s.len() {
         parts.push(&s[start..]);
     }
-
     for part in parts {
         let part = part.trim();
 
         if let Some(colon_pos) = part.find(':') {
             let key_part = &part[0..colon_pos].trim();
             let value_part = &part[colon_pos + 1..].trim();
-
             let key = if key_part.starts_with('"') && key_part.ends_with('"') {
                 &key_part[1..key_part.len() - 1]
             } else {
                 key_part
             };
-
             let value = if value_part.starts_with('"') && value_part.ends_with('"') {
                 &value_part[1..value_part.len() - 1]
             } else {
                 value_part
             };
-
             options.insert(key.to_string(), value.to_string());
         }
     }
@@ -275,6 +246,7 @@ fn simple_parse_json_like_string(s: &str, options: &mut HashMap<String, String>)
 
 pub(super) fn list_built_in_csv_functions() -> Vec<(&'static str, ScalarFunction)> {
     use crate::function::common::ScalarFunctionBuilder as F;
+    
     vec![
         ("from_csv", F::unknown("from_csv")),
         ("schema_of_csv", F::custom(schema_of_csv)),
