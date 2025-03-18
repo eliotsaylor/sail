@@ -5072,6 +5072,7 @@ dependencies = [
  "cbc",
  "chrono",
  "comfy-table",
+ "csv",
  "datafusion",
  "datafusion-common",
  "datafusion-expr",

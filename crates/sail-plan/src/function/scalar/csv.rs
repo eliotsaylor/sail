@@ -1,6 +1,8 @@
 use std::collections::HashMap;
+use std::io::Cursor;
 use std::sync::Arc;
 
+use csv::ReaderBuilder;
 use datafusion::arrow::array::Array;
 use datafusion_common::ScalarValue;
 use datafusion_expr::{expr, lit};
@@ -69,7 +71,7 @@ fn schema_of_csv(input: ScalarFunctionInput) -> PlanResult<expr::Expr> {
     };
 
     if let expr::Expr::Literal(ScalarValue::Utf8(Some(csv_str))) = csv_expr {
-        let fields = parse_csv_line(&csv_str, &options)?;
+        let fields = parse_csv_line_with_csv_crate(&csv_str, &options)?;
         let field_types = infer_field_types(&fields);
 
         let schema_parts: Vec<String> = fields
@@ -89,134 +91,47 @@ fn schema_of_csv(input: ScalarFunctionInput) -> PlanResult<expr::Expr> {
     }
 }
 
-/// Extracts options from a MapArray
-fn extract_map_options(
-    map_array: &Arc<datafusion::arrow::array::MapArray>,
-) -> PlanResult<std::collections::HashMap<String, String>> {
-    let mut options = std::collections::HashMap::new();
-    let map_array = map_array.as_ref();
-    let keys = map_array.keys();
-    let values = map_array.values();
-
-    if let Some(key_array) = keys
-        .as_any()
-        .downcast_ref::<datafusion::arrow::array::StringArray>()
-    {
-        if let Some(value_array) = values
-            .as_any()
-            .downcast_ref::<datafusion::arrow::array::StringArray>()
-        {
-            for i in 0..map_array.len() {
-                let key = key_array.value(i);
-                let value = value_array.value(i);
-                options.insert(key.to_string(), value.to_string());
-            }
-        }
-    }
-
-    Ok(options)
-}
-
-/// Parses options from a string like "key1=value1,key2=value2"
-fn parse_options_string(opts_str: &str) -> PlanResult<std::collections::HashMap<String, String>> {
-    let mut options = std::collections::HashMap::new();
-
-    for part in opts_str.split(',') {
-        if let Some((key, value)) = part.split_once('=') {
-            options.insert(key.trim().to_string(), value.trim().to_string());
-        }
-    }
-
-    Ok(options)
-}
-
-/// Parses a CSV line into fields according to CSV parsing rules
-fn parse_csv_line(
+/// Parses a CSV line using the csv crate
+fn parse_csv_line_with_csv_crate(
     csv_str: &str,
     options: &std::collections::HashMap<String, String>,
 ) -> PlanResult<Vec<String>> {
     let delimiter = options
         .get("delimiter")
         .and_then(|s| s.chars().next())
-        .unwrap_or(',');
+        .unwrap_or(',') as u8;
+
     let quote = options
         .get("quote")
         .and_then(|s| s.chars().next())
-        .unwrap_or('"');
+        .unwrap_or('"') as u8;
 
-    let mut fields = Vec::new();
-    let mut field = String::new();
-    let mut in_quotes = false;
-    let mut chars = csv_str.chars().peekable();
+    let escape = options
+        .get("escape")
+        .and_then(|s| s.chars().next())
+        .unwrap_or('\\') as u8;
 
-    while let Some(c) = chars.next() {
-        if c == quote {
-            if let Some(&next_char) = chars.peek() {
-                if next_char == quote {
-                    field.push(quote);
-                    chars.next();
-                    continue;
-                }
-            }
-            in_quotes = !in_quotes;
-        } else if c == delimiter && !in_quotes {
-            fields.push(std::mem::take(&mut field));
-        } else {
-            field.push(c);
+    let csv_with_newline = format!("{}\n", csv_str);
+    let cursor = Cursor::new(csv_with_newline);
+
+    let mut reader = ReaderBuilder::new()
+        .delimiter(delimiter)
+        .quote(quote)
+        .escape(Some(escape))
+        .has_headers(false)
+        .flexible(true)
+        .from_reader(cursor);
+
+    let mut record = csv::StringRecord::new();
+    match reader.read_record(&mut record) {
+        Ok(true) => {
+            let fields: Vec<String> = record.iter().map(|s| s.to_string()).collect();
+            Ok(fields)
         }
-    }
-
-    fields.push(field);
-    Ok(fields)
-}
-
-/// A simple parser for JSON-like strings of the form {"key":"value","key2":"value2"}
-fn simple_parse_json_like_string(s: &str, options: &mut HashMap<String, String>) {
-    let s = s.trim();
-    let s = if s.starts_with('{') && s.ends_with('}') {
-        &s[1..s.len() - 1]
-    } else {
-        s
-    };
-
-    let mut parts = Vec::new();
-    let mut start = 0;
-    let mut in_quotes = false;
-
-    for (i, c) in s.char_indices() {
-        if c == '"' {
-            in_quotes = !in_quotes;
-        } else if c == ',' && !in_quotes {
-            parts.push(&s[start..i]);
-            start = i + 1;
+        Ok(false) => {
+            Ok(Vec::new())
         }
-    }
-
-    if start < s.len() {
-        parts.push(&s[start..]);
-    }
-
-    for part in parts {
-        let part = part.trim();
-
-        if let Some(colon_pos) = part.find(':') {
-            let key_part = &part[0..colon_pos].trim();
-            let value_part = &part[colon_pos + 1..].trim();
-
-            let key = if key_part.starts_with('"') && key_part.ends_with('"') {
-                &key_part[1..key_part.len() - 1]
-            } else {
-                key_part
-            };
-
-            let value = if value_part.starts_with('"') && value_part.ends_with('"') {
-                &value_part[1..value_part.len() - 1]
-            } else {
-                value_part
-            };
-
-            options.insert(key.to_string(), value.to_string());
-        }
+        Err(e) => Err(PlanError::invalid(format!("Error parsing CSV: {}", e))),
     }
 }
 
@@ -294,6 +209,97 @@ fn is_timestamp_format(value: &str) -> bool {
     }
 
     false
+}
+
+/// Extracts options from a MapArray
+fn extract_map_options(
+    map_array: &Arc<datafusion::arrow::array::MapArray>,
+) -> PlanResult<std::collections::HashMap<String, String>> {
+    let mut options = std::collections::HashMap::new();
+    let map_array = map_array.as_ref();
+    let keys = map_array.keys();
+    let values = map_array.values();
+
+    if let Some(key_array) = keys
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::StringArray>()
+    {
+        if let Some(value_array) = values
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::StringArray>()
+        {
+            for i in 0..map_array.len() {
+                let key = key_array.value(i);
+                let value = value_array.value(i);
+                options.insert(key.to_string(), value.to_string());
+            }
+        }
+    }
+
+    Ok(options)
+}
+
+/// Parses options from a string like "key1=value1,key2=value2"
+fn parse_options_string(opts_str: &str) -> PlanResult<std::collections::HashMap<String, String>> {
+    let mut options = std::collections::HashMap::new();
+
+    for part in opts_str.split(',') {
+        if let Some((key, value)) = part.split_once('=') {
+            options.insert(key.trim().to_string(), value.trim().to_string());
+        }
+    }
+
+    Ok(options)
+}
+
+/// A simple parser for JSON-like strings of the form {"key":"value","key2":"value2"}
+fn simple_parse_json_like_string(s: &str, options: &mut HashMap<String, String>) {
+    let s = s.trim();
+    let s = if s.starts_with('{') && s.ends_with('}') {
+        &s[1..s.len() - 1]
+    } else {
+        s
+    };
+
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut in_quotes = false;
+
+    for (i, c) in s.char_indices() {
+        if c == '"' {
+            in_quotes = !in_quotes;
+        } else if c == ',' && !in_quotes {
+            parts.push(&s[start..i]);
+            start = i + 1;
+        }
+    }
+
+    if start < s.len() {
+        parts.push(&s[start..]);
+    }
+
+    for part in parts {
+        let part = part.trim();
+
+        if let Some(colon_pos) = part.find(':') {
+            let key_part = &part[0..colon_pos].trim();
+            let value_part = &part[colon_pos + 1..].trim();
+
+            let key = if key_part.starts_with('"') && key_part.ends_with('"') {
+                &key_part[1..key_part.len() - 1]
+            } else {
+                key_part
+            };
+
+            let value = if value_part.starts_with('"') && value_part.ends_with('"') {
+                &value_part[1..value_part.len() - 1]
+            } else {
+                value_part
+            };
+
+            options.insert(key.to_string(), value.to_string());
+        }
+    }
 }
 
 pub(super) fn list_built_in_csv_functions() -> Vec<(&'static str, ScalarFunction)> {
