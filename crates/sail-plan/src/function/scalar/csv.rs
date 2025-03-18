@@ -28,74 +28,42 @@ fn schema_of_csv(input: ScalarFunctionInput) -> PlanResult<expr::Expr> {
     let ScalarFunctionInput { arguments, .. } = input;
 
     let (csv_expr, options) = match arguments.len() {
-        1 => (arguments.one()?, std::collections::HashMap::new()),
+        1 => (arguments.one()?, HashMap::new()),
         2 => {
             let csv = arguments[0].clone();
-            let options_expr = arguments[1].clone();
-
-            let options = match options_expr {
-                expr::Expr::Literal(ScalarValue::Map(map_array)) => {
-                    extract_map_options(&map_array)?
-                }
-                expr::Expr::Literal(ScalarValue::Utf8(Some(opts_str))) => {
-                    if opts_str.starts_with('{') && opts_str.ends_with('}') {
-                        let mut options = std::collections::HashMap::new();
-                        simple_parse_json_like_string(&opts_str, &mut options);
-                        options
-                    } else {
-                        parse_options_string(&opts_str)?
-                    }
-                }
-                expr::Expr::ScalarFunction(ref scalar_function) => {
-                    let mut options = std::collections::HashMap::new();
-                    let args = &scalar_function.args;
-                    for i in (0..args.len()).step_by(2) {
-                        if i + 1 < args.len() {
-                            if let (
-                                expr::Expr::Literal(ScalarValue::Utf8(Some(key))),
-                                expr::Expr::Literal(ScalarValue::Utf8(Some(value))),
-                            ) = (&args[i], &args[i + 1])
-                            {
-                                options.insert(key.clone(), value.clone());
-                            }
-                        }
-                    }
-                    options
-                }
-                _ => std::collections::HashMap::new(),
-            };
-
+            let options = extract_options(&arguments[1])?;
             (csv, options)
         }
         _ => return Err(PlanError::todo("schema_of_csv expects 1 or 2 arguments")),
     };
 
-    if let expr::Expr::Literal(ScalarValue::Utf8(Some(csv_str))) = csv_expr {
-        let fields = parse_csv_line_with_csv_crate(&csv_str, &options)?;
-        let field_types = infer_field_types(&fields);
+    let csv_str = match csv_expr {
+        expr::Expr::Literal(ScalarValue::Utf8(Some(csv))) => csv,
+        _ => {
+            return Err(PlanError::todo(
+                "schema_of_csv requires a foldable string input",
+            ))
+        }
+    };
 
-        let schema_parts: Vec<String> = fields
-            .iter()
-            .enumerate()
-            .zip(field_types.iter())
-            .map(|((i, _), field_type)| format!("_c{}: {}", i, field_type))
-            .collect();
+    let fields = parse_csv_line(&csv_str, &options)?;
+    let field_types = infer_field_types(&fields);
 
-        let schema_ddl = format!("STRUCT<{}>", schema_parts.join(", "));
+    let schema_parts: Vec<String> = fields
+        .iter()
+        .enumerate()
+        .zip(field_types.iter())
+        .map(|((i, _), field_type)| format!("_c{}: {}", i, field_type))
+        .collect();
 
-        Ok(lit(ScalarValue::Utf8(Some(schema_ddl))))
-    } else {
-        Err(PlanError::todo(
-            "schema_of_csv requires a foldable string input",
-        ))
-    }
+    let schema_ddl = format!("STRUCT<{}>", schema_parts.join(", "));
+
+    Ok(lit(ScalarValue::Utf8(Some(schema_ddl))))
 }
 
-/// Parses a CSV line using the csv crate
-fn parse_csv_line_with_csv_crate(
-    csv_str: &str,
-    options: &std::collections::HashMap<String, String>,
-) -> PlanResult<Vec<String>> {
+/// Parse a CSV line and return the fields as a vector of strings
+fn parse_csv_line(csv_str: &str, options: &HashMap<String, String>) -> PlanResult<Vec<String>> {
+    // Extract CSV options with defaults
     let delimiter = options
         .get("delimiter")
         .and_then(|s| s.chars().next())
@@ -128,21 +96,45 @@ fn parse_csv_line_with_csv_crate(
             let fields: Vec<String> = record.iter().map(|s| s.to_string()).collect();
             Ok(fields)
         }
-        Ok(false) => {
-            Ok(Vec::new())
-        }
+        Ok(false) => Ok(Vec::new()),
         Err(e) => Err(PlanError::invalid(format!("Error parsing CSV: {}", e))),
     }
 }
 
-/// Infers data types for CSV field values
-///
-/// Type inference follows this order of preference:
-/// 1. INT for integer values
-/// 2. DOUBLE for floating-point numbers
-/// 3. BOOLEAN for true/false values (case insensitive)
-/// 4. DATE/TIMESTAMP for date/time strings
-/// 5. STRING as the default type
+/// Extract options from various input expressions
+fn extract_options(expr: &expr::Expr) -> PlanResult<HashMap<String, String>> {
+    match expr {
+        expr::Expr::Literal(ScalarValue::Map(map_array)) => extract_map_options(map_array),
+        expr::Expr::Literal(ScalarValue::Utf8(Some(opts_str))) => {
+            if opts_str.starts_with('{') && opts_str.ends_with('}') {
+                let mut options = HashMap::new();
+                simple_parse_json_like_string(opts_str, &mut options);
+                Ok(options)
+            } else {
+                parse_options_string(opts_str)
+            }
+        }
+        expr::Expr::ScalarFunction(scalar_function) => {
+            let mut options = HashMap::new();
+            let args = &scalar_function.args;
+            for i in (0..args.len()).step_by(2) {
+                if i + 1 < args.len() {
+                    if let (
+                        expr::Expr::Literal(ScalarValue::Utf8(Some(key))),
+                        expr::Expr::Literal(ScalarValue::Utf8(Some(value))),
+                    ) = (&args[i], &args[i + 1])
+                    {
+                        options.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+            Ok(options)
+        }
+        _ => Ok(HashMap::new()),
+    }
+}
+
+/// Infer data types for CSV field values
 fn infer_field_types(fields: &[String]) -> Vec<String> {
     fields
         .iter()
@@ -165,11 +157,23 @@ fn infer_field_types(fields: &[String]) -> Vec<String> {
                 return "BOOLEAN".to_string();
             }
 
-            if is_date_format(trimmed) {
-                return "DATE".to_string();
+            if trimmed.len() == 10 && trimmed.matches('-').count() == 2 {
+                if let [year, month, day] = trimmed.split('-').collect::<Vec<_>>()[..] {
+                    if year.parse::<i32>().is_ok()
+                        && month.parse::<i32>().is_ok()
+                        && day.parse::<i32>().is_ok()
+                    {
+                        return "DATE".to_string();
+                    }
+                }
             }
 
-            if is_timestamp_format(trimmed) {
+            if (trimmed.len() >= 19
+                && trimmed.contains(' ')
+                && trimmed.matches(':').count() == 2
+                && trimmed.matches('-').count() == 2)
+                || (trimmed.len() == 8 && trimmed.matches(':').count() == 2)
+            {
                 return "TIMESTAMP".to_string();
             }
 
@@ -178,44 +182,11 @@ fn infer_field_types(fields: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Checks if a string appears to be in a date format (YYYY-MM-DD)
-fn is_date_format(value: &str) -> bool {
-    if value.len() == 10 && value.chars().nth(4) == Some('-') && value.chars().nth(7) == Some('-') {
-        let parts: Vec<&str> = value.split('-').collect();
-        if parts.len() == 3 {
-            return parts.iter().all(|part| part.parse::<i32>().is_ok());
-        }
-    }
-    false
-}
-
-/// Checks if a string appears to be in a timestamp format
-fn is_timestamp_format(value: &str) -> bool {
-    if value.len() >= 19
-        && value.chars().nth(4) == Some('-')
-        && value.chars().nth(7) == Some('-')
-        && value.chars().nth(10) == Some(' ')
-        && value.chars().nth(13) == Some(':')
-        && value.chars().nth(16) == Some(':')
-    {
-        return true;
-    }
-
-    if value.len() == 8 && value.chars().nth(2) == Some(':') && value.chars().nth(5) == Some(':') {
-        let parts: Vec<&str> = value.split(':').collect();
-        if parts.len() == 3 {
-            return parts.iter().all(|part| part.parse::<i32>().is_ok());
-        }
-    }
-
-    false
-}
-
 /// Extracts options from a MapArray
 fn extract_map_options(
     map_array: &Arc<datafusion::arrow::array::MapArray>,
-) -> PlanResult<std::collections::HashMap<String, String>> {
-    let mut options = std::collections::HashMap::new();
+) -> PlanResult<HashMap<String, String>> {
+    let mut options = HashMap::new();
     let map_array = map_array.as_ref();
     let keys = map_array.keys();
     let values = map_array.values();
@@ -240,8 +211,8 @@ fn extract_map_options(
 }
 
 /// Parses options from a string like "key1=value1,key2=value2"
-fn parse_options_string(opts_str: &str) -> PlanResult<std::collections::HashMap<String, String>> {
-    let mut options = std::collections::HashMap::new();
+fn parse_options_string(opts_str: &str) -> PlanResult<HashMap<String, String>> {
+    let mut options = HashMap::new();
 
     for part in opts_str.split(',') {
         if let Some((key, value)) = part.split_once('=') {
