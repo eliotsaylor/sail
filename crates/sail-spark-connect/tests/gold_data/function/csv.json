@@ -35,7 +35,7 @@
         }
       },
       "output": {
-        "failure": "not implemented: function: from_csv"
+        "failure": "invalid argument: Invalid schema format: a INT, b DOUBLE. Expected STRUCT<field1: TYPE1, field2: TYPE2, ...>"
       }
     },
     {
@@ -67,7 +67,7 @@
         }
       },
       "output": {
-        "failure": "not implemented: function: from_csv"
+        "failure": "invalid argument: Invalid schema format: time Timestamp. Expected STRUCT<field1: TYPE1, field2: TYPE2, ...>"
       }
     },
     {
@@ -89,7 +89,7 @@
         }
       },
       "output": {
-        "failure": "not implemented: function: schema_of_csv"
+        "success": "ok"
       }
     },
     {
@@ -111,7 +111,7 @@
         }
       },
       "output": {
-        "failure": "not implemented: function: to_csv"
+        "failure": "error in DataFusion: Error during planning: Failed to coerce arguments to satisfy a call to 'to_csv' function: coercion from [Struct([Field { name: \"a\", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: \"b\", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }]), Utf8] to the signature Variadic([Null]) failed No function matches the given name and argument types 'to_csv(Struct([Field { name: \"a\", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: \"b\", data_type: Int32, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }]), Utf8)'. You might need to add explicit type casts.\n\tCandidate functions:\n\tto_csv(Null, ..)"
       }
     },
     {
@@ -133,7 +133,7 @@
         }
       },
       "output": {
-        "failure": "not implemented: function: to_csv"
+        "failure": "error in DataFusion: Error during planning: Failed to coerce arguments to satisfy a call to 'to_csv' function: coercion from [Struct([Field { name: \"time\", data_type: Timestamp(Microsecond, None), nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }]), Utf8] to the signature Variadic([Null]) failed No function matches the given name and argument types 'to_csv(Struct([Field { name: \"time\", data_type: Timestamp(Microsecond, None), nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }]), Utf8)'. You might need to add explicit type casts.\n\tCandidate functions:\n\tto_csv(Null, ..)"
       }
     }
   ]
