@@ -954,11 +954,63 @@ impl datafusion_expr::ScalarUDFImpl for FromCsvUDF {
     }
 }
 
+#[derive(Debug)]
+struct ToCsvUDF;
+
+impl datafusion_expr::ScalarUDFImpl for ToCsvUDF {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "to_csv"
+    }
+
+    fn signature(&self) -> &Signature {
+        static SIGNATURE: std::sync::OnceLock<Signature> = std::sync::OnceLock::new();
+        SIGNATURE.get_or_init(|| {
+            // Use a user_defined signature to allow for more flexibility
+            // This will make it accept variadic arguments (1 or more)
+            Signature::user_defined(Volatility::Immutable)
+        })
+    }
+
+    fn return_type(&self, _arg_types: &[ArrowDataType]) -> Result<ArrowDataType> {
+        // Always return UTF8 string
+        Ok(ArrowDataType::Utf8)
+    }
+
+    fn invoke(&self, args: &[ColumnarValue]) -> Result<ColumnarValue> {
+        csv_to_string(args)
+    }
+
+    // Add coerce_types to make it accept multiple arguments
+    fn coerce_types(&self, arg_types: &[ArrowDataType]) -> Result<Vec<ArrowDataType>> {
+        if arg_types.is_empty() {
+            return Err(DataFusionError::Execution(
+                "to_csv requires at least 1 argument: struct value".to_string(),
+            ));
+        }
+
+        // Accept 1 or 2 arguments (struct and optional options map)
+        let mut result = vec![arg_types[0].clone()];
+
+        // If there's a second argument, it should be a map or string for options
+        if arg_types.len() > 1 {
+            // We'll accept any type for the second argument and handle it in csv_to_string
+            result.push(arg_types[1].clone());
+        }
+
+        Ok(result)
+    }
+}
+
 // Register the CSV functions with DataFusion's function registry
 pub fn register_csv_functions(registry: &mut impl FunctionRegistry) {
     // Create UDFs using DataFusion API
     let schema_of_csv_udf = datafusion_expr::ScalarUDF::new_from_impl(SchemaOfCsvUDF);
     let from_csv_udf = datafusion_expr::ScalarUDF::new_from_impl(FromCsvUDF);
+    let to_csv_udf = datafusion_expr::ScalarUDF::new_from_impl(ToCsvUDF);
 
     // Register with registry
     registry
@@ -967,6 +1019,9 @@ pub fn register_csv_functions(registry: &mut impl FunctionRegistry) {
     registry
         .register_udf(Arc::new(from_csv_udf))
         .expect("Failed to register from_csv");
+    registry
+        .register_udf(Arc::new(to_csv_udf))
+        .expect("Failed to register to_csv");
 }
 
 // Register all functions with the SessionContext
@@ -974,10 +1029,12 @@ pub fn register_all_functions(context: &SessionContext) {
     // Create UDFs
     let schema_of_csv_udf = datafusion_expr::ScalarUDF::new_from_impl(SchemaOfCsvUDF);
     let from_csv_udf = datafusion_expr::ScalarUDF::new_from_impl(FromCsvUDF);
+    let to_csv_udf = datafusion_expr::ScalarUDF::new_from_impl(ToCsvUDF);
 
-    // Register with the context - don't wrap in Arc here
+    // Register with the context
     context.register_udf(schema_of_csv_udf);
     context.register_udf(from_csv_udf);
+    context.register_udf(to_csv_udf);
 }
 
 // Convert a sail DataType to an Arrow DataType
@@ -1304,9 +1361,29 @@ fn extract_options_from_columnar(arg: &ColumnarValue) -> Result<HashMap<String, 
     let mut options = HashMap::new();
 
     match arg {
+        // Handle scalar string options
         ColumnarValue::Scalar(ScalarValue::Utf8(Some(opts_str))) => {
             parse_options_string(opts_str, &mut options)?;
         }
+        // Handle scalar struct options (key-value pairs)
+        ColumnarValue::Scalar(ScalarValue::Struct(struct_array)) => {
+            if struct_array.column_names().len() >= 2 {
+                // Extract key-value pairs from struct fields
+                let key_column = struct_array.column(0);
+                let value_column = struct_array.column(1);
+
+                if let (Some(key_arr), Some(value_arr)) = (
+                    key_column.as_any().downcast_ref::<StringArray>(),
+                    value_column.as_any().downcast_ref::<StringArray>(),
+                ) {
+                    if !key_arr.is_null(0) && !value_arr.is_null(0) {
+                        options
+                            .insert(key_arr.value(0).to_string(), value_arr.value(0).to_string());
+                    }
+                }
+            }
+        }
+        // Handle array of options
         ColumnarValue::Array(array) => {
             if let Some(string_array) = array.as_any().downcast_ref::<StringArray>() {
                 if string_array.len() > 0 && !string_array.is_null(0) {
@@ -1892,40 +1969,6 @@ fn csv_format_timestamp(micros: i64) -> PlanResult<String> {
     Ok(datetime.format("%Y-%m-%d %H:%M:%S").to_string())
 }
 
-#[derive(Debug)]
-struct ToCsvUDF;
-
-impl datafusion_expr::ScalarUDFImpl for ToCsvUDF {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
-    fn name(&self) -> &str {
-        "to_csv"
-    }
-
-    fn signature(&self) -> &Signature {
-        static SIGNATURE: std::sync::OnceLock<Signature> = std::sync::OnceLock::new();
-        SIGNATURE.get_or_init(|| {
-            // Use variadic signature with a vector of any type
-            // This will accept any input type
-            Signature::variadic(
-                vec![datafusion::arrow::datatypes::DataType::Null],
-                Volatility::Immutable,
-            )
-        })
-    }
-
-    fn return_type(&self, _arg_types: &[ArrowDataType]) -> Result<ArrowDataType> {
-        // Always return UTF8 string
-        Ok(ArrowDataType::Utf8)
-    }
-
-    fn invoke(&self, args: &[ColumnarValue]) -> Result<ColumnarValue> {
-        csv_to_string(args)
-    }
-}
-
 // Evaluation function for to_csv UDF
 fn csv_to_string(args: &[ColumnarValue]) -> Result<ColumnarValue> {
     if args.is_empty() {
@@ -1968,7 +2011,42 @@ fn csv_to_string(args: &[ColumnarValue]) -> Result<ColumnarValue> {
                     if array.is_null(i) {
                         string_values.push(None);
                     } else {
-                        string_values.push(Some(format!("row_{}", i)));
+                        // Try to extract a meaningful string representation
+                        let value_str = match array.data_type() {
+                            ArrowDataType::Int32 => {
+                                if let Some(arr) = array
+                                    .as_any()
+                                    .downcast_ref::<datafusion::arrow::array::Int32Array>(
+                                ) {
+                                    Some(arr.value(i).to_string())
+                                } else {
+                                    Some(format!("row_{}", i))
+                                }
+                            }
+                            ArrowDataType::Int64 => {
+                                if let Some(arr) = array
+                                    .as_any()
+                                    .downcast_ref::<datafusion::arrow::array::Int64Array>(
+                                ) {
+                                    Some(arr.value(i).to_string())
+                                } else {
+                                    Some(format!("row_{}", i))
+                                }
+                            }
+                            ArrowDataType::Utf8 => {
+                                if let Some(arr) = array
+                                    .as_any()
+                                    .downcast_ref::<datafusion::arrow::array::StringArray>(
+                                ) {
+                                    Some(arr.value(i).to_string())
+                                } else {
+                                    Some(format!("row_{}", i))
+                                }
+                            }
+                            // Add more types as needed
+                            _ => Some(format!("row_{}", i)),
+                        };
+                        string_values.push(value_str);
                     }
                 }
 
