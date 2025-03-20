@@ -46,7 +46,7 @@ pub fn schema_of_csv(input: ScalarFunctionInput) -> PlanResult<Expr> {
     } else {
         HashMap::new()
     };
-    let fields = parsing::parse_csv_line(&csv_str, &options_map)?;
+    let fields = parsing::parse_csv_line_df(&csv_str, &options_map)?;
     let field_types = schema::infer_field_types(&fields);
     let schema_parts: Vec<String> = fields
         .iter()
@@ -90,7 +90,7 @@ impl ScalarUDFImpl for SchemaOfCsvUDF {
         };
         match csv_input {
             ColumnarValue::Scalar(ScalarValue::Utf8(Some(csv_str))) => {
-                let fields = parsing::parse_csv_line(csv_str, &options_map)?;
+                let fields = parsing::parse_csv_line_df(csv_str, &options_map)?;
                 let field_types = schema::infer_field_types(&fields);
                 let schema_parts: Vec<String> = fields
                     .iter()
@@ -106,7 +106,7 @@ impl ScalarUDFImpl for SchemaOfCsvUDF {
                 if let Some(string_array) = array.as_any().downcast_ref::<StringArray>() {
                     if string_array.len() > 0 && !string_array.is_null(0) {
                         let csv_str = string_array.value(0);
-                        let fields = parsing::parse_csv_line(csv_str, &options_map)?;
+                        let fields = parsing::parse_csv_line_df(csv_str, &options_map)?;
                         let field_types = schema::infer_field_types(&fields);
                         let schema_parts: Vec<String> = fields
                             .iter()

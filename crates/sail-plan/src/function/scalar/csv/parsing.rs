@@ -2,9 +2,10 @@ use std::collections::HashMap;
 use std::io::Cursor;
 
 use csv::ReaderBuilder;
-use datafusion::common::{DataFusionError, Result};
+use datafusion::common::Result;
 
 use super::options::CsvOptions;
+use crate::error::{PlanError, PlanResult};
 
 pub enum CsvParseMode {
     Simple,
@@ -17,51 +18,65 @@ pub enum CsvParseMode {
 
 pub fn parse_csv(
     csv_str: &str,
-    _options: &HashMap<String, String>,
+    options: &HashMap<String, String>,
     mode: CsvParseMode,
 ) -> Result<Vec<String>> {
     match mode {
-        CsvParseMode::Simple => parse_csv_line(csv_str, _options),
-        CsvParseMode::Complex => parse_complex_csv(csv_str, _options),
-        CsvParseMode::WithoutJson => parse_csv_with_options(csv_str, _options),
-        CsvParseMode::WithJson => csv_split_with_json(csv_str, _options)
-            .map(|v| v.into_iter().map(String::from).collect()),
+        CsvParseMode::Simple => parse_csv_line_df(csv_str, options),
+        CsvParseMode::Complex => parse_complex_csv(csv_str, options),
+        CsvParseMode::WithoutJson => parse_csv_with_options(csv_str, options),
+        CsvParseMode::WithJson => {
+            csv_split_with_json(csv_str, options).map(|v| v.into_iter().map(String::from).collect())
+        }
     }
 }
 
-pub fn parse_csv_line(csv_str: &str, options: &HashMap<String, String>) -> Result<Vec<String>> {
-    let csv_options = CsvOptions::from_hashmap(options);
-    let csv_with_newline = format!("{}\n", csv_str);
-    let cursor = Cursor::new(csv_with_newline);
-    let trim_mode =
-        if csv_options.ignore_leading_whitespace && csv_options.ignore_trailing_whitespace {
-            csv::Trim::All
-        } else if csv_options.ignore_leading_whitespace {
-            csv::Trim::Headers
-        } else if csv_options.ignore_trailing_whitespace {
-            csv::Trim::Fields
-        } else {
-            csv::Trim::None
-        };
+/// Parse a CSV line into fields using the CSV crate (DataFusion Result version)
+///
+/// This version returns a DataFusion Result for compatibility with existing code
+pub fn parse_csv_line_df(csv_line: &str, options: &HashMap<String, String>) -> Result<Vec<String>> {
+    parse_csv_line(csv_line, options).map_err(|e| {
+        datafusion::common::DataFusionError::Execution(format!("CSV parsing error: {}", e))
+    })
+}
+
+/// Parse a CSV line into fields using the CSV crate
+///
+/// Arguments:
+///   - csv_line: A string containing a single line of CSV data
+///   - options: A HashMap of CSV parsing options
+///
+/// Returns:
+///   - A vector of extracted field values as strings
+pub fn parse_csv_line(
+    csv_line: &str,
+    options: &HashMap<String, String>,
+) -> PlanResult<Vec<String>> {
+    let delimiter = options
+        .get("delimiter")
+        .and_then(|s| s.chars().next())
+        .unwrap_or(',');
+    let quote = options
+        .get("quote")
+        .and_then(|s| s.chars().next())
+        .unwrap_or('"');
+    let escape = options
+        .get("escape")
+        .and_then(|s| s.chars().next())
+        .unwrap_or('\\');
     let mut reader = ReaderBuilder::new()
-        .delimiter(csv_options.delimiter as u8)
-        .quote(csv_options.quote as u8)
-        .escape(Some(csv_options.escape as u8))
+        .delimiter(delimiter as u8)
+        .quote(quote as u8)
+        .escape(Some(escape as u8))
         .has_headers(false)
-        .trim(trim_mode)
-        .flexible(true)
-        .from_reader(cursor);
-    let mut record = csv::StringRecord::new();
-    match reader.read_record(&mut record) {
-        Ok(true) => {
-            let fields: Vec<String> = record.iter().map(|s| s.to_string()).collect();
-            Ok(fields)
-        }
-        Ok(false) => Ok(Vec::new()),
-        Err(e) => Err(DataFusionError::Execution(format!(
-            "Error parsing CSV: {}",
-            e
-        ))),
+        .from_reader(Cursor::new(csv_line));
+    if let Some(result) = reader.records().next() {
+        let record =
+            result.map_err(|e| PlanError::internal(format!("CSV parsing error: {}", e)))?;
+        let fields: Vec<String> = record.iter().map(|s| s.to_string()).collect();
+        Ok(fields)
+    } else {
+        Ok(Vec::new())
     }
 }
 
@@ -135,9 +150,9 @@ pub fn should_quote_csv_field(value: &str, delimiter: char) -> bool {
         || value.is_empty()
 }
 
-fn parse_csv_with_options(
+pub fn parse_csv_with_options(
     csv_str: &str,
-    _options: &HashMap<String, String>,
+    options: &HashMap<String, String>,
 ) -> Result<Vec<String>> {
-    parse_csv_line(csv_str, _options)
+    parse_csv_line_df(csv_str, options)
 }

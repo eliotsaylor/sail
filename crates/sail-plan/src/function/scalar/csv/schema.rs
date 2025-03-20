@@ -3,9 +3,7 @@ use std::sync::Arc;
 use datafusion::arrow::array::{
     Array, BooleanBuilder, Float64Builder, Int32Builder, Int64Builder, StringBuilder, StructArray,
 };
-use datafusion::arrow::datatypes::{
-    DataType as ArrowDataType, DataType, Field as ArrowField, Field,
-};
+use datafusion::arrow::datatypes::{DataType, Field as ArrowField};
 use datafusion::common::{Result, ScalarValue};
 
 use super::conversion;
@@ -283,11 +281,11 @@ pub fn create_struct_array_from_fields(
             field_arrays.len()
         )));
     }
-    let fields: Vec<(Arc<Field>, Arc<dyn Array>)> = struct_fields
+    let fields: Vec<(Arc<ArrowField>, Arc<dyn Array>)> = struct_fields
         .iter()
         .enumerate()
         .map(|(i, (name, type_str))| {
-            let field = Arc::new(Field::new(
+            let field = Arc::new(ArrowField::new(
                 name,
                 match type_str.trim().to_uppercase().as_str() {
                     "INT" | "INTEGER" => DataType::Int32,
