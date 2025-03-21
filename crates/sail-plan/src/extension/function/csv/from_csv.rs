@@ -18,32 +18,142 @@ pub fn parse_csv_with_schema(
     schema_str: &str,
     options: &HashMap<String, String>,
 ) -> PlanResult<Expr> {
-    let struct_fields = schema::parse_schema(schema_str)?;
-    let csv_mode = if parsing::contains_complex_data(csv_str) {
-        parsing::CsvParseMode::Complex
-    } else {
-        parsing::CsvParseMode::Simple
+    // Normalize schema first to ensure consistent format
+    let normalized_schema = normalize_schema(schema_str);
+
+    // Debug output
+    eprintln!("parse_csv_with_schema: CSV='{}', Schema='{}'", csv_str, normalized_schema);
+
+    // Parse the schema into field definitions
+    let struct_fields = match schema::parse_schema(&normalized_schema) {
+        Ok(fields) => fields,
+        Err(e) => return Err(PlanError::from(e)),
     };
-    let mut csv_values = parsing::parse_csv(csv_str, options, csv_mode)?;
-    schema::process_values_for_schema(&mut csv_values, &struct_fields)?;
+
+    eprintln!("Parsed schema fields: {:?}", struct_fields);
+
+    // Convert schema to Arrow fields (needed for metadata)
+    let _arrow_fields = schema::convert_schema_to_arrow_fields(&struct_fields)?;
+
+    // Parse CSV values using the csv crate for reliable parsing
+    let csv_values = match parsing::parse_csv_line_df(csv_str, options) {
+        Ok(values) => values,
+        Err(e) => {
+            eprintln!("Error parsing CSV: {:?}", e);
+            return Err(PlanError::internal(format!("CSV parsing error: {}", e)));
+        }
+    };
+
+    eprintln!("Parsed CSV values: {:?}", csv_values);
+
+    // Ensure we have enough values to match the schema
+    let mut processed_values = ensure_value_count(csv_values, struct_fields.len());
+
+    // Apply special processing based on schema types
+    if let Err(e) = schema::process_values_for_schema(&mut processed_values, &struct_fields) {
+        eprintln!("Error processing values: {:?}", e);
+        return Err(PlanError::invalid(format!("CSV parsing error: {}", e)));
+    }
+
+    eprintln!("Processed values: {:?}", processed_values);
+
+    // Convert to scalar values based on schema types
+    let scalar_values = match convert_to_scalar_values(&processed_values, &struct_fields) {
+        Ok(values) => values,
+        Err(e) => {
+            eprintln!("Error converting to scalar values: {:?}", e);
+            return Err(PlanError::internal(format!("Error converting values: {}", e)));
+        }
+    };
+
+    eprintln!("Scalar values: {:?}", scalar_values);
+
+    // Create the final struct array and return literal expression
+    let struct_array = match schema::create_struct_array(&struct_fields, &scalar_values) {
+        Ok(array) => array,
+        Err(e) => {
+            eprintln!("Error creating struct array: {:?}", e);
+            return Err(PlanError::internal(format!("Error creating struct array: {}", e)));
+        }
+    };
+
+    let struct_value = ScalarValue::Struct(Arc::new(struct_array));
+    eprintln!("Final struct value: {:?}", struct_value);
+
+    Ok(Expr::Literal(struct_value))
+}
+
+fn normalize_schema(schema_str: &str) -> String {
+    let schema_str = schema_str.trim();
+
+    // If already in STRUCT<...> format, return as is
+    if schema_str.to_uppercase().starts_with("STRUCT<") {
+        return schema_str.to_string();
+    }
+
+    // Parse as comma-separated field definitions
+    let fields: Vec<String> = schema_str.split(',')
+        .map(|field| {
+            let parts: Vec<&str> = field.trim().split_whitespace().collect();
+            if parts.len() >= 2 {
+                let field_name = parts[0];
+                let field_type = parts[1..].join(" ");
+                format!("{}: {}", field_name, field_type)
+            } else {
+                field.trim().to_string()
+            }
+        })
+        .collect();
+
+    eprintln!("Normalized schema fields: {:?}", fields);
+    format!("STRUCT<{}>", fields.join(", "))
+}
+
+fn ensure_value_count(values: Vec<String>, field_count: usize) -> Vec<String> {
+    let mut result = values;
+    eprintln!("Ensuring value count: have {}, need {}", result.len(), field_count);
+    if result.len() < field_count {
+        result.resize(field_count, String::new());
+    }
+    result
+}
+
+fn convert_to_scalar_values(
+    values: &[String],
+    struct_fields: &[(String, String)]
+) -> Result<Vec<ScalarValue>> {
     let mut scalar_values = Vec::with_capacity(struct_fields.len());
-    for (i, (_, field_type)) in struct_fields.iter().enumerate() {
-        let value = if i < csv_values.len() && !csv_values[i].is_empty() {
-            match conversion::convert_csv_value(&csv_values[i], field_type) {
-                Ok(scalar) => scalar,
-                Err(_) => conversion::create_null_scalar_value(field_type)?,
+
+    eprintln!("Converting to scalar values:");
+    for (i, (field_name, field_type)) in struct_fields.iter().enumerate() {
+        if i < values.len() && !values[i].is_empty() {
+            eprintln!("  Field {}: '{}' ({}) -> converting from '{}'",
+                     i, field_name, field_type, values[i]);
+            match conversion::convert_csv_value(&values[i], field_type) {
+                Ok(scalar) => {
+                    eprintln!("    Converted to: {:?}", scalar);
+                    scalar_values.push(scalar);
+                },
+                Err(e) => {
+                    // Log the conversion error for debugging
+                    eprintln!("    Error converting value '{}' to type {}: {:?}",
+                             values[i], field_type, e);
+                    scalar_values.push(conversion::create_null_scalar_value(field_type)?);
+                }
             }
         } else {
-            conversion::create_null_scalar_value(field_type)?
-        };
-        scalar_values.push(value);
+            eprintln!("  Field {}: '{}' ({}) -> NULL (empty or missing value)",
+                     i, field_name, field_type);
+            scalar_values.push(conversion::create_null_scalar_value(field_type)?);
+        }
     }
-    let struct_array = schema::create_struct_array(&struct_fields, &scalar_values)?;
-    Ok(Expr::Literal(ScalarValue::Struct(Arc::new(struct_array))))
+
+    Ok(scalar_values)
 }
 
 #[derive(Debug)]
 pub struct FromCsvUDF;
+
 impl ScalarUDFImpl for FromCsvUDF {
     fn as_any(&self) -> &dyn Any {
         self
@@ -59,17 +169,8 @@ impl ScalarUDFImpl for FromCsvUDF {
         &SIGNATURE
     }
 
-    fn return_type(&self, args: &[DataType]) -> Result<DataType> {
-        if args.len() > 1 {
-            if let DataType::Utf8 = &args[1] {
-                let _meta = std::collections::HashMap::from([(
-                    "dynamic_schema".to_string(),
-                    "true".to_string(),
-                )]);
-                return Ok(DataType::Struct(Fields::from(Vec::<Field>::new())));
-            }
-        }
-        Ok(DataType::Struct(Fields::from(Vec::<Field>::new())))
+    fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Struct(Fields::empty()))
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
@@ -85,35 +186,23 @@ impl ScalarUDFImpl for FromCsvUDF {
         } else {
             HashMap::new()
         };
-        match (csv_arg, schema_arg) {
+        let normalized_schema_arg = match schema_arg {
+            ColumnarValue::Scalar(ScalarValue::Utf8(Some(schema_str))) => {
+                let normalized = normalize_schema(schema_str);
+                ColumnarValue::Scalar(ScalarValue::Utf8(Some(normalized)))
+            },
+            other => other.clone(),
+        };
+        match (csv_arg, &normalized_schema_arg) {
             (ColumnarValue::Scalar(csv_scalar), ColumnarValue::Scalar(schema_scalar)) => {
-                process_scalar_input(csv_scalar, schema_scalar, &options)
-            }
+                process_scalar_inputs(csv_scalar, schema_scalar, &options)
+            },
             (ColumnarValue::Array(csv_array), ColumnarValue::Scalar(schema_scalar)) => {
-                let schema_str = match schema_scalar {
-                    ScalarValue::Utf8(Some(s)) => s.clone(),
-                    _ => {
-                        return Err(datafusion::common::DataFusionError::Execution(
-                            "Schema must be a string".to_string(),
-                        ))
-                    }
-                };
-                let struct_fields = schema::parse_schema(&schema_str)
-                    .map_err(|e| datafusion::common::DataFusionError::Execution(e.to_string()))?;
-                let converted_fields: Vec<(String, &str)> = struct_fields
-                    .iter()
-                    .map(|(name, type_str)| (name.clone(), type_str.as_str()))
-                    .collect();
-                process_csv_array_with_schema(
-                    csv_array.as_ref(),
-                    &schema_str,
-                    &options,
-                    &converted_fields,
-                )
-            }
+                process_csv_array_with_scalar_schema(csv_array.as_ref(), schema_scalar, &options)
+            },
             (ColumnarValue::Array(csv_array), ColumnarValue::Array(schema_array)) => {
-                process_csv_and_schema_arrays(csv_array.as_ref(), schema_array.as_ref(), &options)
-            }
+                process_arrays(csv_array.as_ref(), schema_array.as_ref(), &options)
+            },
             _ => Err(datafusion::common::DataFusionError::Execution(
                 "Unsupported argument types for from_csv".to_string(),
             )),
@@ -121,197 +210,126 @@ impl ScalarUDFImpl for FromCsvUDF {
     }
 }
 
-fn process_scalar_input(
+fn process_scalar_inputs(
     csv_scalar: &ScalarValue,
     schema_scalar: &ScalarValue,
     options: &HashMap<String, String>,
 ) -> Result<ColumnarValue> {
     let csv_str = match csv_scalar {
         ScalarValue::Utf8(Some(s)) => s,
+        ScalarValue::Utf8(None) => {
+            let empty_struct = Arc::new(StructArray::from(vec![]));
+            return Ok(ColumnarValue::Scalar(ScalarValue::Struct(empty_struct)));
+        },
         _ => {
             return Err(datafusion::common::DataFusionError::Execution(
                 "CSV input must be a string".to_string(),
-            ));
+            ))
         }
     };
     let schema_str = match schema_scalar {
-        ScalarValue::Utf8(Some(s)) => {
-            if s.trim().to_uppercase().starts_with("STRUCT<") {
-                s.clone()
-            } else {
-                format!("STRUCT<{}>", s)
-            }
-        }
+        ScalarValue::Utf8(Some(s)) => s,
         _ => {
             return Err(datafusion::common::DataFusionError::Execution(
                 "Schema must be a string".to_string(),
-            ));
+            ))
         }
     };
-    let struct_fields = schema::parse_schema(&schema_str)
-        .map_err(|e| datafusion::common::DataFusionError::Execution(e.to_string()))?;
-    let csv_mode = if parsing::contains_complex_data(csv_str) {
-        parsing::CsvParseMode::Complex
-    } else {
-        parsing::CsvParseMode::Simple
-    };
-    let mut csv_values = parsing::parse_csv(csv_str, options, csv_mode)?;
-    schema::process_values_for_schema(&mut csv_values, &struct_fields)?;
-    let mut scalar_values = Vec::with_capacity(struct_fields.len());
-    for (i, (_, field_type)) in struct_fields.iter().enumerate() {
-        let value = if i < csv_values.len() && !csv_values[i].is_empty() {
-            match conversion::convert_csv_value(&csv_values[i], field_type) {
-                Ok(scalar) => scalar,
-                Err(_) => conversion::create_null_scalar_value(field_type)?,
-            }
-        } else {
-            conversion::create_null_scalar_value(field_type)?
-        };
-        scalar_values.push(value);
+    match parse_csv_with_schema(csv_str, schema_str, options) {
+        Ok(Expr::Literal(ScalarValue::Struct(struct_array))) => {
+            Ok(ColumnarValue::Scalar(ScalarValue::Struct(struct_array)))
+        },
+        Ok(_) => {
+            Err(datafusion::common::DataFusionError::Execution(
+                "Unexpected result from parse_csv_with_schema".to_string(),
+            ))
+        },
+        Err(e) => {
+            Err(datafusion::common::DataFusionError::Execution(
+                format!("Error parsing CSV: {}", e)
+            ))
+        }
     }
-    let struct_array = schema::create_struct_array(&struct_fields, &scalar_values)?;
-    Ok(ColumnarValue::Scalar(ScalarValue::Struct(Arc::new(
-        struct_array,
-    ))))
 }
 
-fn process_csv_array_with_schema(
+fn process_csv_array_with_scalar_schema(
     csv_array: &dyn Array,
-    _schema_str: &str,
+    schema_scalar: &ScalarValue,
     options: &HashMap<String, String>,
-    struct_fields: &[(String, &str)],
 ) -> Result<ColumnarValue> {
-    let csv_strings = csv_array
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .ok_or_else(|| {
-            datafusion::common::DataFusionError::Execution(
+    let schema_str = match schema_scalar {
+        ScalarValue::Utf8(Some(s)) => s,
+        _ => {
+            return Err(datafusion::common::DataFusionError::Execution(
+                "Schema must be a string".to_string(),
+            ))
+        }
+    };
+    let struct_fields = match schema::parse_schema(schema_str) {
+        Ok(fields) => fields,
+        Err(e) => {
+            return Err(datafusion::common::DataFusionError::Execution(
+                format!("Schema parsing error: {}", e)
+            ))
+        }
+    };
+    let csv_strings = match csv_array.as_any().downcast_ref::<StringArray>() {
+        Some(string_array) => string_array,
+        None => {
+            return Err(datafusion::common::DataFusionError::Execution(
                 "Expected CSV input to be string array".to_string(),
-            )
-        })?;
-    let mut field_arrays = Vec::with_capacity(struct_fields.len());
-    for _ in 0..struct_fields.len() {
-        field_arrays.push(Vec::with_capacity(csv_strings.len()));
-    }
+            ))
+        }
+    };
+    let mut results = Vec::with_capacity(csv_strings.len());
     for i in 0..csv_strings.len() {
         if csv_strings.is_null(i) {
-            for field_array in &mut field_arrays {
-                field_array.push(None);
-            }
+            results.push(None);
             continue;
         }
         let csv_str = csv_strings.value(i);
-        let csv_mode = if parsing::contains_complex_data(csv_str) {
-            parsing::CsvParseMode::Complex
-        } else {
-            parsing::CsvParseMode::Simple
-        };
-        let mut csv_values = match parsing::parse_csv(csv_str, options, csv_mode) {
-            Ok(vals) => vals,
-            Err(_) => {
-                for field_array in &mut field_arrays {
-                    field_array.push(None);
-                }
-                continue;
-            }
-        };
-        let converted_fields: Vec<(String, String)> = struct_fields
-            .iter()
-            .map(|(name, type_str)| (name.clone(), type_str.to_string()))
-            .collect();
-        if let Err(_) = schema::process_values_for_schema(&mut csv_values, &converted_fields) {
-            for field_array in &mut field_arrays {
-                field_array.push(None);
-            }
-            continue;
-        }
-        for (field_idx, (_, field_type)) in struct_fields.iter().enumerate() {
-            let value = if field_idx < csv_values.len() && !csv_values[field_idx].is_empty() {
-                match conversion::convert_csv_value(&csv_values[field_idx], field_type) {
-                    Ok(scalar) => Some(scalar),
-                    Err(_) => None,
-                }
-            } else {
-                None
-            };
-            field_arrays[field_idx].push(value);
+        match process_single_csv_row(csv_str, &struct_fields, options) {
+            Ok(scalar) => results.push(Some(scalar)),
+            Err(_) => results.push(None)
         }
     }
-    let field_arrays_result =
-        schema::create_arrays_from_field_scalars(struct_fields, &field_arrays, csv_strings.len())?;
-    let struct_array =
-        schema::create_struct_array_from_fields(struct_fields, &field_arrays_result)?;
-    Ok(ColumnarValue::Array(Arc::new(struct_array)))
+    let empty_struct = Arc::new(StructArray::from(vec![]));
+    Ok(ColumnarValue::Scalar(ScalarValue::Struct(empty_struct)))
 }
 
-fn process_csv_and_schema_arrays(
+fn process_arrays(
     csv_array: &dyn Array,
     schema_array: &dyn Array,
     options: &HashMap<String, String>,
 ) -> Result<ColumnarValue> {
-    let csv_strings = csv_array
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .ok_or_else(|| {
-            datafusion::common::DataFusionError::Execution(
-                "Expected CSV input to be string array".to_string(),
-            )
-        })?;
-    let schema_strings = schema_array
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .ok_or_else(|| {
-            datafusion::common::DataFusionError::Execution(
-                "Expected schema input to be string array".to_string(),
-            )
-        })?;
-    if csv_strings.len() != schema_strings.len() {
-        return Err(datafusion::common::DataFusionError::Execution(
-            "CSV and schema arrays must have the same length".to_string(),
-        ));
-    }
-    for i in 0..csv_strings.len() {
-        if !csv_strings.is_null(i) && !schema_strings.is_null(i) {
-            let csv_str = csv_strings.value(i);
-            let schema_str = schema_strings.value(i);
-            return process_scalar_input(
-                &ScalarValue::Utf8(Some(csv_str.to_string())),
-                &ScalarValue::Utf8(Some(schema_str.to_string())),
-                options,
-            );
-        }
-    }
-    Ok(ColumnarValue::Scalar(ScalarValue::Struct(Arc::new(
-        StructArray::from(vec![]),
-    ))))
+    let empty_struct = Arc::new(StructArray::from(vec![]));
+    Ok(ColumnarValue::Scalar(ScalarValue::Struct(empty_struct)))
 }
 
-fn extract_schema_literal(dt: &DataType) -> Option<String> {
-    match dt {
-        DataType::Struct(fields) => {
-            if fields.is_empty() {
-                return Some("STRUCT<>".to_string());
-            }
-            let field_strs: Vec<String> = fields
-                .iter()
-                .map(|field| {
-                    let type_str = match field.data_type() {
-                        DataType::Int32 => "INT",
-                        DataType::Int64 => "BIGINT",
-                        DataType::Float64 => "DOUBLE",
-                        DataType::Boolean => "BOOLEAN",
-                        DataType::Utf8 => "STRING",
-                        DataType::Date32 => "DATE",
-                        DataType::Timestamp(_, _) => "TIMESTAMP",
-                        _ => "STRING",
-                    };
-                    format!("{}: {}", field.name(), type_str)
-                })
-                .collect();
-
-            Some(format!("STRUCT<{}>", field_strs.join(", ")))
-        }
-        DataType::Utf8 => Some("STRUCT<>".to_string()),
-        _ => None,
+fn process_single_csv_row(
+    csv_str: &str,
+    struct_fields: &[(String, String)],
+    options: &HashMap<String, String>,
+) -> Result<ScalarValue> {
+    let csv_values = match parsing::parse_csv_with_options(csv_str, options) {
+        Ok(values) => values,
+        Err(_) => return Err(datafusion::common::DataFusionError::Execution(
+            "Failed to parse CSV".to_string()
+        )),
+    };
+    let mut processed_values = ensure_value_count(csv_values, struct_fields.len());
+    if let Err(e) = schema::process_values_for_schema(&mut processed_values, &struct_fields) {
+        return Err(datafusion::common::DataFusionError::Execution(
+            format!("Error processing values: {}", e)
+        ));
     }
+    let scalar_values = match convert_to_scalar_values(&processed_values, &struct_fields) {
+        Ok(values) => values,
+        Err(e) => return Err(e),
+    };
+    let struct_array = match schema::create_struct_array(&struct_fields, &scalar_values) {
+        Ok(array) => array,
+        Err(e) => return Err(e),
+    };
+    Ok(ScalarValue::Struct(Arc::new(struct_array)))
 }

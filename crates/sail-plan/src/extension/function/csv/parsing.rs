@@ -34,10 +34,49 @@ pub fn parse_csv(
 /// Parse a CSV line into fields using the CSV crate (DataFusion Result version)
 ///
 /// This version returns a DataFusion Result for compatibility with existing code
-pub fn parse_csv_line_df(csv_line: &str, options: &HashMap<String, String>) -> Result<Vec<String>> {
-    parse_csv_line(csv_line, options).map_err(|e| {
-        datafusion::common::DataFusionError::Execution(format!("CSV parsing error: {}", e))
-    })
+pub fn parse_csv_line_df(csv_str: &str, options: &HashMap<String, String>) -> Result<Vec<String>> {
+    eprintln!("Parsing CSV line: '{}'", csv_str);
+
+    if !csv_str.contains('"') && !csv_str.contains('\\') {
+        let simple_values: Vec<String> = csv_str.split(',')
+            .map(|s| s.trim().to_string())
+            .collect();
+        eprintln!("Simple split result: {:?}", simple_values);
+        if !simple_values.is_empty() {
+            return Ok(simple_values);
+        }
+    }
+
+    let delimiter = options.get("delimiter")
+        .or_else(|| options.get("sep"))
+        .map(|s| s.chars().next().unwrap_or(','))
+        .unwrap_or(',');
+
+    let quote = options.get("quote")
+        .map(|s| s.chars().next().unwrap_or('"'))
+        .unwrap_or('"');
+    let escape = options.get("escape")
+        .map(|s| s.chars().next().unwrap_or('\\'))
+        .unwrap_or('\\');
+
+    let mut reader = ReaderBuilder::new()
+        .delimiter(delimiter as u8)
+        .quote(quote as u8)
+        .escape(Some(escape as u8))
+        .has_headers(false)
+        .from_reader(Cursor::new(csv_str));
+
+    if let Some(result) = reader.records().next() {
+        let record = result.map_err(|e|
+            datafusion::common::DataFusionError::Execution(format!("CSV parsing error: {}", e))
+        )?;
+        let fields: Vec<String> = record.iter().map(|s| s.to_string()).collect();
+        eprintln!("CSV crate parsing result: {:?}", fields);
+        Ok(fields)
+    } else {
+        eprintln!("No records found in CSV");
+        Ok(Vec::new())
+    }
 }
 
 /// Parse a CSV line into fields using the CSV crate
@@ -150,9 +189,6 @@ pub fn should_quote_csv_field(value: &str, delimiter: char) -> bool {
         || value.is_empty()
 }
 
-pub fn parse_csv_with_options(
-    csv_str: &str,
-    options: &HashMap<String, String>,
-) -> Result<Vec<String>> {
+pub fn parse_csv_with_options(csv_str: &str, options: &HashMap<String, String>) -> Result<Vec<String>> {
     parse_csv_line_df(csv_str, options)
 }

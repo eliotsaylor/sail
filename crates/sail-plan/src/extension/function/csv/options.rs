@@ -30,7 +30,10 @@ impl CsvOptions {
     }
     pub fn from_hashmap(options: &HashMap<String, String>) -> Self {
         let mut csv_options = Self::new();
-        if let Some(delimiter) = options.get("delimiter").and_then(|s| s.chars().next()) {
+        if let Some(delimiter) = options.get("delimiter")
+            .or_else(|| options.get("sep"))
+            .and_then(|s| s.chars().next())
+        {
             csv_options.delimiter = delimiter;
         }
         if let Some(quote) = options.get("quote").and_then(|s| s.chars().next()) {

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use datafusion::arrow::array::{
     Array, BooleanBuilder, Float64Builder, Int32Builder, Int64Builder, StringBuilder, StructArray,
 };
-use datafusion::arrow::datatypes::{DataType, Field as ArrowField};
+use datafusion::arrow::datatypes::{DataType, Field as ArrowField, Fields, TimeUnit};
 use datafusion::common::{Result, ScalarValue};
 
 use super::conversion;
@@ -59,39 +59,16 @@ pub fn infer_field_types(fields: &[String]) -> Vec<String> {
     fields
         .iter()
         .map(|field| {
-            let trimmed = field.trim();
-            if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
-                return "STRING".to_string();
+            // Try to infer types in this priority order: INT, DECIMAL, BOOLEAN, STRING
+            if let Ok(_) = field.parse::<i32>() {
+                "INT".to_string()
+            } else if let Ok(_) = field.parse::<f64>() {
+                "DECIMAL".to_string()
+            } else if field.eq_ignore_ascii_case("true") || field.eq_ignore_ascii_case("false") {
+                "BOOLEAN".to_string()
+            } else {
+                "STRING".to_string()
             }
-            if trimmed.parse::<i64>().is_ok() {
-                return "INT".to_string();
-            }
-            if trimmed.parse::<f64>().is_ok() {
-                return "DOUBLE".to_string();
-            }
-            if trimmed.eq_ignore_ascii_case("true") || trimmed.eq_ignore_ascii_case("false") {
-                return "BOOLEAN".to_string();
-            }
-            if trimmed.len() == 10 && trimmed.matches('-').count() == 2 {
-                if let [year, month, day] = trimmed.split('-').collect::<Vec<_>>()[..] {
-                    if year.parse::<i32>().is_ok()
-                        && month.parse::<i32>().is_ok()
-                        && day.parse::<i32>().is_ok()
-                    {
-                        return "DATE".to_string();
-                    }
-                }
-            }
-            if (trimmed.len() >= 19
-                && trimmed.contains(' ')
-                && trimmed.matches(':').count() == 2
-                && trimmed.matches('-').count() == 2)
-                || (trimmed.len() == 8 && trimmed.matches(':').count() == 2)
-            {
-                return "TIMESTAMP".to_string();
-            }
-
-            "STRING".to_string()
         })
         .collect()
 }
@@ -142,28 +119,20 @@ pub fn process_values_for_schema(
 
 pub fn create_struct_array(
     struct_fields: &[(String, String)],
-    values: &[ScalarValue],
+    scalar_values: &[ScalarValue]
 ) -> Result<StructArray> {
-    let mut field_arrays = Vec::with_capacity(struct_fields.len());
-    for (i, (field_name, field_type)) in struct_fields.iter().enumerate() {
-        let scalar_value = if i < values.len() {
-            values[i].clone()
-        } else {
-            conversion::create_null_scalar_value(field_type)?
-        };
-        let arrow_type =
-            conversion::to_arrow_data_type(conversion::TypeInput::StringType(field_type));
-        let field = Arc::new(ArrowField::new(field_name, arrow_type, true));
-        let array = scalar_value.to_array()?;
-        field_arrays.push((field, array));
+    use datafusion::arrow::array::{ArrayRef, StructArray};
+    use datafusion::arrow::datatypes::Field;
+    use std::sync::Arc;
+    let mut field_array_pairs = Vec::with_capacity(struct_fields.len());
+    for ((name, type_str), scalar) in struct_fields.iter().zip(scalar_values.iter()) {
+        let data_type = conversion::to_arrow_data_type(conversion::TypeInput::StringType(type_str));
+        let field = Arc::new(Field::new(name, data_type.clone(), true));
+        let array: ArrayRef = scalar.to_array_of_size(1)?;
+        field_array_pairs.push((field, array));
     }
-
-    Ok(StructArray::from(
-        field_arrays
-            .iter()
-            .map(|(field, array)| (Arc::clone(field), Arc::clone(array)))
-            .collect::<Vec<_>>(),
-    ))
+    let struct_array = StructArray::from(field_array_pairs);
+    Ok(struct_array)
 }
 
 pub fn create_arrays_from_field_scalars(
@@ -295,10 +264,33 @@ pub fn create_struct_array_from_fields(
                     "BOOLEAN" | "BOOL" => DataType::Boolean,
                     _ => DataType::Utf8,
                 },
-                true, // nullable
+                true,
             ));
             (field, field_arrays[i].clone())
         })
         .collect();
     Ok(StructArray::from(fields))
+}
+
+pub fn convert_schema_to_arrow_fields(
+    struct_fields: &[(String, String)]
+) -> Result<Fields> {
+    let mut fields = Vec::with_capacity(struct_fields.len());
+
+    for (name, type_str) in struct_fields {
+        let data_type = match type_str.trim().to_uppercase().as_str() {
+            "INT" | "INTEGER" => DataType::Int32,
+            "BIGINT" | "LONG" => DataType::Int64,
+            "DOUBLE" | "FLOAT" => DataType::Float64,
+            "BOOLEAN" | "BOOL" => DataType::Boolean,
+            "STRING" | "VARCHAR" | "CHAR" => DataType::Utf8,
+            "DATE" => DataType::Date32,
+            "TIMESTAMP" => DataType::Timestamp(TimeUnit::Microsecond, None),
+            _ => DataType::Utf8,
+        };
+
+        fields.push(ArrowField::new(name, data_type, true));
+    }
+
+    Ok(Fields::from(fields))
 }

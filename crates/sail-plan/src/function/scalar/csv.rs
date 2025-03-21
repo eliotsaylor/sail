@@ -91,11 +91,11 @@ fn from_csv(input: ScalarFunctionInput) -> PlanResult<Expr> {
         }
         _ => return Err(PlanError::todo("from_csv expects 2 or 3 arguments")),
     };
+
     if let (
         Expr::Literal(ScalarValue::Utf8(Some(csv_str))),
         Expr::Literal(ScalarValue::Utf8(Some(schema_str))),
-    ) = (&csv_expr, &schema_expr)
-    {
+    ) = (&csv_expr, &schema_expr) {
         let options_map = if let Some(opt_expr) = &options_expr {
             options::extract_options_from_expr(opt_expr)?
         } else {
@@ -104,12 +104,13 @@ fn from_csv(input: ScalarFunctionInput) -> PlanResult<Expr> {
 
         return parse_csv_with_schema(csv_str, schema_str, &options_map);
     }
+
     let options_expr = if let Some(opt_expr) = options_expr {
         opt_expr
     } else {
-        // Empty options map
         Expr::Literal(ScalarValue::Utf8(Some(String::new())))
     };
+
     let udf = Arc::new(datafusion_expr::ScalarUDF::new_from_impl(FromCsvUDF));
     Ok(datafusion_expr::expr::Expr::ScalarFunction(
         datafusion_expr::expr::ScalarFunction::new_udf(
