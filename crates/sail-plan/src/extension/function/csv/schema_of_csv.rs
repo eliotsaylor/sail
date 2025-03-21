@@ -13,50 +13,6 @@ use crate::error::{PlanError, PlanResult};
 use crate::function::common::ScalarFunctionInput;
 use crate::utils::ItemTaker;
 
-/// Infers the schema of a CSV string and returns it in DDL format.
-///
-/// Arguments:
-///   - csv_str: A string literal containing CSV data. The function expects a
-///     single line of CSV data.
-///   - options: An optional map of CSV parsing options. Supported options include:
-///     - delimiter: The character used to separate fields (default: ',')
-///     - quote: The character used for quoting (default: '"')
-///     - escape: The character used for escaping (default: '\')
-///
-/// Returns:
-///   - A string literal in DDL format representing the inferred schema, in the form:
-///     "STRUCT<_c0: TYPE1, _c1: TYPE2, ...>"
-pub fn schema_of_csv(input: ScalarFunctionInput) -> PlanResult<Expr> {
-    let ScalarFunctionInput { arguments, .. } = input;
-    let (csv_expr, option_expr) = match arguments.len() {
-        1 => (arguments.one()?, None),
-        2 => (arguments[0].clone(), Some(arguments[1].clone())),
-        _ => return Err(PlanError::todo("schema_of_csv expects 1 or 2 arguments")),
-    };
-    let csv_str = match csv_expr {
-        Expr::Literal(ScalarValue::Utf8(Some(csv))) => csv,
-        _ => {
-            return Err(PlanError::todo(
-                "schema_of_csv requires a foldable string input",
-            ))
-        }
-    };
-    let options_map = if let Some(opt_expr) = &option_expr {
-        options::extract_options_from_expr(opt_expr)?
-    } else {
-        HashMap::new()
-    };
-    let fields = parsing::parse_csv_line_df(&csv_str, &options_map)?;
-    let field_types = schema::infer_field_types(&fields);
-    let schema_parts: Vec<String> = fields
-        .iter()
-        .enumerate()
-        .zip(field_types.iter())
-        .map(|((i, _), field_type)| format!("_c{}: {}", i, field_type))
-        .collect();
-    let schema_ddl = format!("STRUCT<{}>", schema_parts.join(", "));
-    Ok(lit(ScalarValue::Utf8(Some(schema_ddl))))
-}
 
 #[derive(Debug)]
 pub struct SchemaOfCsvUDF;

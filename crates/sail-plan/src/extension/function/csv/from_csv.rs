@@ -13,65 +13,6 @@ use super::{conversion, options, parsing, schema};
 use crate::error::{PlanError, PlanResult};
 use crate::function::common::ScalarFunctionInput;
 
-/// Parses a column containing a CSV string into a struct with the specified schema.
-///
-/// Arguments:
-///   - csv_str: A column or string literal containing CSV data (one line of CSV).
-///   - schema_expr: A string literal or column containing the schema in DDL format.
-///   - options: An optional map of CSV parsing options. Supported options include:
-///     - delimiter: The character used to separate fields (default: ',')
-///     - quote: The character used for quoting (default: '"')
-///     - escape: The character used for escaping (default: '\')
-///     - nullValue: The string that represents null values (default: "")
-///     - ignoreLeadingWhiteSpace: Whether to trim leading spaces (default: false)
-///     - ignoreTrailingWhiteSpace: Whether to trim trailing spaces (default: false)
-///
-/// Returns:
-///   - A struct value that conforms to the specified schema. Returns null for unparseable input.
-pub fn from_csv(input: ScalarFunctionInput) -> PlanResult<Expr> {
-    let ScalarFunctionInput { arguments, .. } = input;
-    let (csv_expr, schema_expr, options_expr) = match arguments.len() {
-        2 => {
-            let csv = arguments[0].clone();
-            let schema = arguments[1].clone();
-            (csv, schema, None)
-        }
-        3 => {
-            let csv = arguments[0].clone();
-            let schema = arguments[1].clone();
-            let opts = Some(arguments[2].clone());
-            (csv, schema, opts)
-        }
-        _ => return Err(PlanError::todo("from_csv expects 2 or 3 arguments")),
-    };
-    if let (
-        Expr::Literal(ScalarValue::Utf8(Some(csv_str))),
-        Expr::Literal(ScalarValue::Utf8(Some(schema_str))),
-    ) = (&csv_expr, &schema_expr)
-    {
-        let options_map = if let Some(opt_expr) = &options_expr {
-            options::extract_options_from_expr(opt_expr)?
-        } else {
-            HashMap::new()
-        };
-
-        return parse_csv_with_schema(csv_str, schema_str, &options_map);
-    }
-    let options_expr = if let Some(opt_expr) = options_expr {
-        opt_expr
-    } else {
-        // Empty options map
-        Expr::Literal(ScalarValue::Utf8(Some(String::new())))
-    };
-    let udf = Arc::new(datafusion_expr::ScalarUDF::new_from_impl(FromCsvUDF));
-    Ok(datafusion_expr::expr::Expr::ScalarFunction(
-        datafusion_expr::expr::ScalarFunction::new_udf(
-            udf,
-            vec![csv_expr, schema_expr, options_expr],
-        ),
-    ))
-}
-
 fn parse_csv_with_schema(
     csv_str: &str,
     schema_str: &str,

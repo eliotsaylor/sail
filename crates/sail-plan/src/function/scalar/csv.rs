@@ -1,9 +1,16 @@
-
 use datafusion::common::{Result, ScalarValue};
 use datafusion::logical_expr::{lit, Expr};
+use std::collections::HashMap;
+use std::sync::Arc;
 use crate::error::{PlanError, PlanResult};
 use crate::function::common::ScalarFunctionInput;
 
+// Import helpers from extension module
+use crate::extension::function::csv::options;
+use crate::extension::function::csv::parsing;
+use crate::extension::function::csv::schema;
+use crate::extension::function::csv::udf::{FromCsvUDF, ToCsvUDF};
+use crate::extension::function::csv::formatter::{extract_struct_field_values, format_as_csv};
 
 /// Infers the schema of a CSV string and returns it in DDL format.
 ///

@@ -14,51 +14,6 @@ use crate::error::{PlanError, PlanResult};
 use crate::function::common::ScalarFunctionInput;
 use crate::utils::ItemTaker;
 
-/// Converts a column containing a struct type into a CSV string.
-///
-/// Arguments:
-///   - struct_col: A column containing a struct type to be converted to CSV.
-///   - options: An optional map of CSV formatting options. Supported options include:
-///     - delimiter: The character used to separate fields (default: ',')
-///     - quote: The character used for quoting (default: '"')
-///     - escape: The character used for escaping (default: '\')
-///     - dateFormat: The format string for date values (default: 'yyyy-MM-dd')
-///     - timestampFormat: The format string for timestamp values (default: 'yyyy-MM-dd HH:mm:ss')
-///
-/// Returns:
-///   - A string containing the CSV representation of the struct.
-pub fn to_csv(input: ScalarFunctionInput) -> PlanResult<Expr> {
-    let ScalarFunctionInput { arguments, .. } = input;
-    let (struct_expr, options_expr) = match arguments.len() {
-        1 => (arguments.one()?, None),
-        2 => {
-            let struct_expr = arguments[0].clone();
-            let opts = Some(arguments[1].clone());
-            (struct_expr, opts)
-        }
-        _ => return Err(PlanError::todo("to_csv expects 1 or 2 arguments")),
-    };
-
-    if let Expr::Literal(ScalarValue::Struct(struct_array)) = &struct_expr {
-        let options_map = if let Some(opts) = &options_expr {
-            options::extract_options_from_expr(opts)?
-        } else {
-            HashMap::new()
-        };
-        let field_values = extract_struct_field_values(struct_array, &options_map)?;
-        let csv_str = format_as_csv(&field_values, &options_map)?;
-        return Ok(lit(ScalarValue::Utf8(Some(csv_str))));
-    }
-    let options_expr = if let Some(opts) = options_expr {
-        opts
-    } else {
-        Expr::Literal(ScalarValue::Utf8(Some(String::new())))
-    };
-    let udf = Arc::new(datafusion_expr::ScalarUDF::new_from_impl(ToCsvUDF));
-    Ok(datafusion_expr::expr::Expr::ScalarFunction(
-        datafusion_expr::expr::ScalarFunction::new_udf(udf, vec![struct_expr, options_expr]),
-    ))
-}
 
 fn extract_struct_field_values(
     struct_array: &StructArray,
