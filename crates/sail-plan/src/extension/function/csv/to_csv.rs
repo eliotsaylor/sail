@@ -14,8 +14,7 @@ use crate::error::{PlanError, PlanResult};
 use crate::function::common::ScalarFunctionInput;
 use crate::utils::ItemTaker;
 
-
-fn extract_struct_field_values(
+pub fn extract_struct_field_values(
     struct_array: &StructArray,
     options: &HashMap<String, String>,
 ) -> PlanResult<Vec<String>> {
@@ -112,7 +111,10 @@ fn format_field_value(
     }
 }
 
-fn format_as_csv(field_values: &[String], options: &HashMap<String, String>) -> PlanResult<String> {
+pub fn format_as_csv(
+    field_values: &[String],
+    options: &HashMap<String, String>,
+) -> PlanResult<String> {
     let delimiter = options
         .get("delimiter")
         .map(|s| s.chars().next().unwrap_or(','))

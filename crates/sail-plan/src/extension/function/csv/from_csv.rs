@@ -13,7 +13,7 @@ use super::{conversion, options, parsing, schema};
 use crate::error::{PlanError, PlanResult};
 use crate::function::common::ScalarFunctionInput;
 
-fn parse_csv_with_schema(
+pub fn parse_csv_with_schema(
     csv_str: &str,
     schema_str: &str,
     options: &HashMap<String, String>,

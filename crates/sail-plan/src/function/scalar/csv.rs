@@ -1,16 +1,19 @@
-use datafusion::common::{Result, ScalarValue};
-use datafusion::logical_expr::{lit, Expr};
 use std::collections::HashMap;
 use std::sync::Arc;
-use crate::error::{PlanError, PlanResult};
-use crate::function::common::ScalarFunctionInput;
 
-// Import helpers from extension module
-use crate::extension::function::csv::options;
-use crate::extension::function::csv::parsing;
-use crate::extension::function::csv::schema;
-use crate::extension::function::csv::udf::{FromCsvUDF, ToCsvUDF};
-use crate::extension::function::csv::formatter::{extract_struct_field_values, format_as_csv};
+use datafusion::common::{Result, ScalarValue};
+use datafusion::logical_expr::{lit, Expr};
+use datafusion_expr;
+
+use crate::error::{PlanError, PlanResult};
+use crate::extension::function::csv::from_csv::{parse_csv_with_schema, FromCsvUDF};
+use crate::extension::function::csv::to_csv::{
+    extract_struct_field_values, format_as_csv, ToCsvUDF,
+};
+use crate::extension::function::csv::{options, parsing, schema};
+use crate::function::common::ScalarFunctionInput;
+use crate::function::ScalarFunction;
+use crate::utils::ItemTaker;
 
 /// Infers the schema of a CSV string and returns it in DDL format.
 ///
@@ -162,7 +165,7 @@ fn to_csv(input: ScalarFunctionInput) -> PlanResult<Expr> {
     ))
 }
 
-pub(super) fn list_built_in_hash_functions() -> Vec<(&'static str, ScalarFunction)> {
+pub(super) fn list_built_in_csv_functions() -> Vec<(&'static str, ScalarFunction)> {
     use crate::function::common::ScalarFunctionBuilder as F;
 
     vec![

@@ -13,7 +13,6 @@ use crate::error::{PlanError, PlanResult};
 use crate::function::common::ScalarFunctionInput;
 use crate::utils::ItemTaker;
 
-
 #[derive(Debug)]
 pub struct SchemaOfCsvUDF;
 
